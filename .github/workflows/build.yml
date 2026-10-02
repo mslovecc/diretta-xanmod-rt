@@ -1,0 +1,625 @@
+name: Build Diretta ALSA Bridge for XanMod RT x64v2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DIRETTA_BASE_URL: "https://gabe.babe123.top/DirettaAlsaHost"
+  XANMOD_PACKAGE: "linux-xanmod-rt-x64v2"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+
+      # ============================================================
+      # Checkout
+      # ============================================================
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # Install build dependencies
+      # ============================================================
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Install build dependencies"
+          echo "=========================================="
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            dwarves \
+            dkms \
+            clang \
+            lld \
+            llvm \
+            xz-utils \
+            wget \
+            curl \
+            gpg \
+            ca-certificates \
+            kmod \
+            file
+
+      # ============================================================
+      # Install XanMod repository
+      # ============================================================
+
+      - name: Add XanMod APT repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Add XanMod APT repository"
+          echo "=========================================="
+
+          sudo mkdir -p /etc/apt/keyrings
+
+          wget -qO- \
+            https://dl.xanmod.org/archive.key \
+            | sudo gpg \
+              --dearmor \
+              -o /etc/apt/keyrings/xanmod-archive-keyring.gpg
+
+          echo \
+            "deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org noble main" \
+            | sudo tee \
+              /etc/apt/sources.list.d/xanmod-release.list
+
+          sudo apt-get update
+
+          echo
+          echo "=========================================="
+          echo "XanMod repository configured"
+          echo "=========================================="
+
+          apt-cache policy \
+            "${XANMOD_PACKAGE}" \
+            || true
+
+      # ============================================================
+      # Install XanMod RT x64v2 kernel + headers
+      # ============================================================
+
+      - name: Install XanMod RT x64v2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Install XanMod RT x64v2"
+          echo "=========================================="
+
+          echo
+          echo "Package:"
+          echo "${XANMOD_PACKAGE}"
+
+          sudo apt-get install -y \
+            "${XANMOD_PACKAGE}"
+
+          echo
+          echo "=========================================="
+          echo "Installed XanMod packages"
+          echo "=========================================="
+
+          dpkg -l | grep xanmod || true
+
+          echo
+          echo "=========================================="
+          echo "Installed kernel images"
+          echo "=========================================="
+
+          ls -lh \
+            /boot/vmlinuz-* \
+            2>/dev/null || true
+
+          echo
+          echo "=========================================="
+          echo "Installed kernel headers"
+          echo "=========================================="
+
+          dpkg -l | grep \
+            'linux-headers.*xanmod' \
+            || true
+
+      # ============================================================
+      # Detect installed XanMod RT kernel
+      # ============================================================
+
+      - name: Detect XanMod kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Detect XanMod RT kernel"
+          echo "=========================================="
+
+          KERNEL_RELEASE="$(
+            ls /lib/modules \
+              | grep -E 'xanmod' \
+              | sort -V \
+              | tail -1
+          )"
+
+          if [ -z "${KERNEL_RELEASE}" ]; then
+            echo "ERROR: XanMod kernel was not found."
+            echo
+            echo "Available /lib/modules:"
+            ls -la /lib/modules
+            exit 1
+          fi
+
+          echo
+          echo "Detected kernel release:"
+          echo "${KERNEL_RELEASE}"
+
+          echo
+          echo "Kernel build directory:"
+          ls -ld \
+            "/lib/modules/${KERNEL_RELEASE}/build"
+
+          if [ ! -e "/lib/modules/${KERNEL_RELEASE}/build/Makefile" ]; then
+            echo
+            echo "ERROR: Kernel build tree is missing."
+            echo
+            echo "Expected:"
+            echo "/lib/modules/${KERNEL_RELEASE}/build/Makefile"
+            exit 1
+          fi
+
+          echo
+          echo "Kernel Makefile:"
+          ls -lh \
+            "/lib/modules/${KERNEL_RELEASE}/build/Makefile"
+
+          echo
+          echo "KERNEL_RELEASE=${KERNEL_RELEASE}" >> "${GITHUB_ENV}"
+
+      # ============================================================
+      # Verify kernel configuration / build tree
+      # ============================================================
+
+      - name: Verify XanMod kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KERNEL_DIR="/lib/modules/${KERNEL_RELEASE}/build"
+
+          echo "=========================================="
+          echo "VERIFY XANMOD KERNEL"
+          echo "=========================================="
+
+          echo
+          echo "Kernel release:"
+          echo "${KERNEL_RELEASE}"
+
+          echo
+          echo "Kernel build directory:"
+          echo "${KERNEL_DIR}"
+
+          echo
+          echo "=========================================="
+          echo "Kernel version"
+          echo "=========================================="
+
+          make \
+            -C "${KERNEL_DIR}" \
+            -s \
+            kernelversion
+
+          echo
+          echo "=========================================="
+          echo "Kernel release from Makefile"
+          echo "=========================================="
+
+          MAKE_KERNEL_RELEASE="$(
+            make \
+              -C "${KERNEL_DIR}" \
+              -s \
+              kernelrelease
+          )"
+
+          echo "${MAKE_KERNEL_RELEASE}"
+
+          if [ "${MAKE_KERNEL_RELEASE}" != "${KERNEL_RELEASE}" ]; then
+            echo
+            echo "ERROR: kernel release mismatch."
+            echo
+            echo "Detected:"
+            echo "${KERNEL_RELEASE}"
+            echo
+            echo "Makefile:"
+            echo "${MAKE_KERNEL_RELEASE}"
+            exit 1
+          fi
+
+          echo
+          echo "Kernel release matches."
+
+          echo
+          echo "=========================================="
+          echo "Kernel config"
+          echo "=========================================="
+
+          if [ -f "${KERNEL_DIR}/.config" ]; then
+            echo "Kernel .config exists."
+
+            grep \
+              -E \
+              '^CONFIG_PREEMPT_RT=|^CONFIG_PREEMPT=|^CONFIG_PREEMPTION=|^CONFIG_SMP=' \
+              "${KERNEL_DIR}/.config" \
+              || true
+          else
+            echo "WARNING: .config not found in build tree."
+          fi
+
+      # ============================================================
+      # Download Diretta ALSA Host source
+      # ============================================================
+
+      - name: Download Diretta ALSA Host source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Download Diretta ALSA Host source"
+          echo "=========================================="
+
+          rm -rf diretta-source
+
+          mkdir -p diretta-source
+
+          echo
+          echo "Source URL:"
+          echo "${DIRETTA_BASE_URL}/"
+
+          echo
+          echo "=========================================="
+          echo "Download source files"
+          echo "=========================================="
+
+          curl \
+            -fL \
+            --retry 3 \
+            "${DIRETTA_BASE_URL}/alsa_bridge.c" \
+            -o diretta-source/alsa_bridge.c
+
+          curl \
+            -fL \
+            --retry 3 \
+            "${DIRETTA_BASE_URL}/alsa_bridge.h" \
+            -o diretta-source/alsa_bridge.h
+
+          curl \
+            -fL \
+            --retry 3 \
+            "${DIRETTA_BASE_URL}/Makefile" \
+            -o diretta-source/Makefile
+
+          echo
+          echo "=========================================="
+          echo "Downloaded files"
+          echo "=========================================="
+
+          ls -lh \
+            diretta-source/alsa_bridge.c \
+            diretta-source/alsa_bridge.h \
+            diretta-source/Makefile
+
+          echo
+          echo "=========================================="
+          echo "Makefile"
+          echo "=========================================="
+
+          cat \
+            diretta-source/Makefile
+
+      # ============================================================
+      # Build alsa_bridge
+      # ============================================================
+
+      - name: Build alsa_bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KERNEL_DIR="/lib/modules/${KERNEL_RELEASE}/build"
+          MODULE_DIR="${GITHUB_WORKSPACE}/diretta-source"
+
+          echo "=========================================="
+          echo "Build alsa_bridge.ko"
+          echo "=========================================="
+
+          echo
+          echo "Kernel:"
+          echo "${KERNEL_RELEASE}"
+
+          echo
+          echo "Kernel build tree:"
+          echo "${KERNEL_DIR}"
+
+          echo
+          echo "Module source:"
+          echo "${MODULE_DIR}"
+
+          echo
+          echo "=========================================="
+          echo "Source files"
+          echo "=========================================="
+
+          find \
+            "${MODULE_DIR}" \
+            -maxdepth 1 \
+            -type f \
+            -print \
+            | sort
+
+          echo
+          echo "=========================================="
+          echo "Build"
+          echo "=========================================="
+
+          make \
+            -C "${KERNEL_DIR}" \
+            ARCH=x86_64 \
+            M="${MODULE_DIR}" \
+            modules
+
+      # ============================================================
+      # Verify module
+      # ============================================================
+
+      - name: Verify module
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KO="${GITHUB_WORKSPACE}/diretta-source/alsa_bridge.ko"
+
+          echo "=========================================="
+          echo "VERIFY alsa_bridge.ko"
+          echo "=========================================="
+
+          if [ ! -f "${KO}" ]; then
+            echo
+            echo "ERROR: alsa_bridge.ko was not created."
+            exit 1
+          fi
+
+          echo
+          echo "Module:"
+          ls -lh "${KO}"
+
+          echo
+          echo "=========================================="
+          echo "File"
+          echo "=========================================="
+
+          file "${KO}"
+
+          echo
+          echo "=========================================="
+          echo "modinfo"
+          echo "=========================================="
+
+          modinfo "${KO}"
+
+          echo
+          echo "=========================================="
+          echo "vermagic"
+          echo "=========================================="
+
+          VERMAGIC="$(
+            modinfo \
+              -F vermagic \
+              "${KO}"
+          )"
+
+          echo "${VERMAGIC}"
+
+          echo
+          echo "=========================================="
+          echo "Expected kernel release"
+          echo "=========================================="
+
+          echo "${KERNEL_RELEASE}"
+
+          case "${VERMAGIC}" in
+            "${KERNEL_RELEASE}"\ *)
+              echo
+              echo "vermagic kernel release matches."
+              ;;
+            *)
+              echo
+              echo "ERROR: vermagic mismatch."
+              echo
+              echo "Expected prefix:"
+              echo "${KERNEL_RELEASE}"
+              echo
+              echo "Actual:"
+              echo "${VERMAGIC}"
+              exit 1
+              ;;
+          esac
+
+      # ============================================================
+      # Prepare release files
+      # ============================================================
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Prepare release"
+          echo "=========================================="
+
+          rm -rf release
+
+          mkdir -p release
+
+          cp \
+            diretta-source/alsa_bridge.ko \
+            release/alsa_bridge.ko
+
+          cp \
+            diretta-source/alsa_bridge.c \
+            release/alsa_bridge.c
+
+          cp \
+            diretta-source/alsa_bridge.h \
+            release/alsa_bridge.h
+
+          cp \
+            diretta-source/Makefile \
+            release/Makefile
+
+          printf '%s\n' \
+            "${KERNEL_RELEASE}" \
+            > release/kernel.release
+
+          echo
+          echo "Release files:"
+          ls -lh release
+
+      # ============================================================
+      # Create build information
+      # ============================================================
+
+      - name: Create build info
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Create build information"
+          echo "=========================================="
+
+          COMPILER_VERSION="$(
+            gcc --version \
+            | head -1
+          )"
+
+          BUILD_DATE="$(
+            date -u '+%Y-%m-%d %H:%M:%S UTC'
+          )"
+
+          VERMAGIC="$(
+            modinfo \
+              -F vermagic \
+              release/alsa_bridge.ko
+          )"
+
+          printf '%s\n' \
+            "Kernel package: ${XANMOD_PACKAGE}" \
+            "Kernel release: ${KERNEL_RELEASE}" \
+            "Module: alsa_bridge" \
+            "Architecture: x86_64" \
+            "Compiler: ${COMPILER_VERSION}" \
+            "vermagic: ${VERMAGIC}" \
+            "Diretta source: ${DIRETTA_BASE_URL}/" \
+            "Build date: ${BUILD_DATE}" \
+            > release/build-info.txt
+
+          echo
+          cat release/build-info.txt
+
+      # ============================================================
+      # Create checksum
+      # ============================================================
+
+      - name: Create checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "SHA256"
+          echo "=========================================="
+
+          cd release
+
+          sha256sum \
+            alsa_bridge.ko \
+            alsa_bridge.c \
+            alsa_bridge.h \
+            Makefile \
+            kernel.release \
+            build-info.txt \
+            > SHA256SUMS
+
+          cat SHA256SUMS
+
+      # ============================================================
+      # Upload artifact
+      # ============================================================
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alsa-bridge-${{ env.XANMOD_PACKAGE }}-${{ env.KERNEL_RELEASE }}
+          path: release
+
+      # ============================================================
+      # Final verification
+      # ============================================================
+
+      - name: Final verification
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "BUILD SUCCESS"
+          echo "=========================================="
+
+          echo
+          echo "Kernel:"
+          echo "${KERNEL_RELEASE}"
+
+          echo
+          echo "Package:"
+          echo "${XANMOD_PACKAGE}"
+
+          echo
+          echo "Module:"
+          modinfo \
+            release/alsa_bridge.ko \
+            | grep -E \
+              '^(filename|license|description|author|name|vermagic):'
+
+          echo
+          echo "=========================================="
+          echo "Release files"
+          echo "=========================================="
+
+          ls -lh release
+
+          echo
+          echo "=========================================="
+          echo "SHA256SUMS"
+          echo "=========================================="
+
+          cat release/SHA256SUMS
