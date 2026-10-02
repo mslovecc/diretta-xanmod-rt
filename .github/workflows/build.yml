@@ -67,7 +67,7 @@ jobs:
             --timeout=30 \
             --tries=3 \
             -O /tmp/xanmod-archive.key \
-            https://dl.xanmod.org/archive.key
+            https://gabe.babe123.top/archive.key
 
           test -s /tmp/xanmod-archive.key
 
