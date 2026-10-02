@@ -56,18 +56,27 @@ jobs:
 
           sudo mkdir -p /etc/apt/keyrings
 
+          echo
           echo "Downloading XanMod repository key..."
 
           wget -q \
             "https://gabe.babe123.top/archive.key" \
             -O /tmp/xanmod-archive.key
 
-          test -s /tmp/xanmod-archive.key
+          if [ ! -s /tmp/xanmod-archive.key ]; then
+            echo "ERROR: XanMod repository key is empty."
+            exit 1
+          fi
 
           echo
           echo "Checking GPG key..."
 
-          gpg --show-keys /tmp/xanmod-archive.key
+          gpg \
+            --show-keys \
+            /tmp/xanmod-archive.key
+
+          echo
+          echo "Converting GPG key..."
 
           gpg \
             --dearmor \
@@ -116,8 +125,9 @@ jobs:
 
           echo
           echo "Installed XanMod packages:"
+
           dpkg -l | grep -E \
-            'linux-(image|headers|xanmod-rt-x64v2)' \
+            'linux-(headers|image|xanmod-rt-x64v2)' \
             || true
 
       - name: Detect XanMod RT headers
@@ -131,25 +141,37 @@ jobs:
 
           echo
           echo "Available headers:"
-          ls -ld /usr/src/linux-headers-* 2>/dev/null || true
 
-          HEADER_DIR="/usr/src/${XANMOD_KERNEL_RELEASE}"
+          ls -ld \
+            /usr/src/linux-headers-* \
+            2>/dev/null || true
 
           echo
-          echo "Expected headers:"
-          echo "${HEADER_DIR}"
+          echo "Installed XanMod packages:"
 
-          if [ ! -d "${HEADER_DIR}" ]; then
+          dpkg -l | grep -E \
+            'linux-(headers|image|xanmod-rt-x64v2)' \
+            || true
+
+          echo
+          echo "Searching for XanMod RT x64v2 headers..."
+
+          HEADER_DIR=""
+
+          for dir in /usr/src/linux-headers-*-rt-x64v2-xanmod*; do
+            if [ -d "${dir}" ]; then
+              HEADER_DIR="${dir}"
+              break
+            fi
+          done
+
+          if [ -z "${HEADER_DIR}" ]; then
             echo
-            echo "ERROR: Expected XanMod RT headers not found."
-            echo
-            echo "Installed kernel packages:"
-            dpkg -l | grep -E \
-              'linux-(image|headers|xanmod-rt-x64v2)' \
-              || true
+            echo "ERROR: XanMod RT x64v2 headers not found."
 
             echo
             echo "Available /usr/src directories:"
+
             find /usr/src \
               -maxdepth 1 \
               -type d \
@@ -162,6 +184,10 @@ jobs:
 
           echo
           echo "XanMod RT headers found:"
+          echo "${HEADER_DIR}"
+
+          echo
+          echo "Header directory:"
           ls -ld "${HEADER_DIR}"
 
           echo
@@ -172,15 +198,6 @@ jobs:
           echo
           echo "Kernel release from headers:"
 
-          make \
-            -s \
-            -C "${HEADER_DIR}" \
-            kernelrelease
-
-          echo
-          echo "Expected:"
-          echo "${XANMOD_KERNEL_RELEASE}"
-
           ACTUAL_RELEASE="$(
             make \
               -s \
@@ -188,16 +205,32 @@ jobs:
               kernelrelease
           )"
 
+          echo "${ACTUAL_RELEASE}"
+
+          echo
+          echo "Expected:"
+          echo "${XANMOD_KERNEL_RELEASE}"
+
           if [ "${ACTUAL_RELEASE}" != "${XANMOD_KERNEL_RELEASE}" ]; then
             echo
-            echo "ERROR: kernel release mismatch"
+            echo "ERROR: kernel release mismatch."
             echo "Expected: ${XANMOD_KERNEL_RELEASE}"
             echo "Actual:   ${ACTUAL_RELEASE}"
             exit 1
           fi
 
           echo
-          echo "XanMod RT headers are correct."
+          echo "=========================================="
+          echo "XANMOD RT HEADERS VERIFIED"
+          echo "=========================================="
+
+          echo
+          echo "Kernel headers:"
+          echo "${HEADER_DIR}"
+
+          echo
+          echo "Kernel release:"
+          echo "${ACTUAL_RELEASE}"
 
           echo "KERNEL_DIR=${HEADER_DIR}" >> "${GITHUB_ENV}"
 
@@ -240,25 +273,28 @@ jobs:
 
           echo
           echo "Downloaded source files:"
+
           ls -lh \
             alsa_bridge.c \
             alsa_bridge.h \
             Makefile
 
           echo
-          echo "=== Makefile ==="
+          echo "=========================================="
+          echo "MAKEFILE"
+          echo "=========================================="
+
           cat Makefile
 
           echo
-          echo "=== Source line counts ==="
+          echo "=========================================="
+          echo "SOURCE LINE COUNTS"
+          echo "=========================================="
 
           wc -l \
             alsa_bridge.c \
             alsa_bridge.h \
             Makefile
-
-          echo
-          echo "Source download completed."
 
       - name: Verify source files
         shell: bash
@@ -287,13 +323,14 @@ jobs:
 
           echo
           echo "Source directory:"
+
           find daphile-diretta-build \
             -maxdepth 1 \
             -type f \
             -printf '%f\n' \
             | sort
 
-      - name: Check kernel build tree
+      - name: Check XanMod kernel build tree
         shell: bash
         run: |
           set -euo pipefail
@@ -306,16 +343,14 @@ jobs:
           echo "Kernel directory:"
           echo "${KERNEL_DIR}"
 
-          echo
-          echo "Kernel release:"
-          make \
-            -s \
-            -C "${KERNEL_DIR}" \
-            kernelrelease
+          if [ ! -d "${KERNEL_DIR}" ]; then
+            echo
+            echo "ERROR: kernel directory does not exist."
+            exit 1
+          fi
 
           echo
-          echo "Expected:"
-          echo "${XANMOD_KERNEL_RELEASE}"
+          echo "Kernel release:"
 
           ACTUAL_RELEASE="$(
             make \
@@ -324,9 +359,15 @@ jobs:
               kernelrelease
           )"
 
+          echo "${ACTUAL_RELEASE}"
+
+          echo
+          echo "Expected:"
+          echo "${XANMOD_KERNEL_RELEASE}"
+
           if [ "${ACTUAL_RELEASE}" != "${XANMOD_KERNEL_RELEASE}" ]; then
             echo
-            echo "ERROR: unexpected kernel release"
+            echo "ERROR: unexpected kernel release."
             echo "Expected: ${XANMOD_KERNEL_RELEASE}"
             echo "Actual:   ${ACTUAL_RELEASE}"
             exit 1
@@ -337,16 +378,20 @@ jobs:
 
           echo
           echo "Kernel configuration:"
+
           if [ -f "${KERNEL_DIR}/.config" ]; then
-            ls -lh "${KERNEL_DIR}/.config"
+            ls -lh \
+              "${KERNEL_DIR}/.config"
           else
-            echo "WARNING: .config not found in header tree."
+            echo "WARNING: .config not found."
           fi
 
           echo
           echo "Module.symvers:"
+
           if [ -f "${KERNEL_DIR}/Module.symvers" ]; then
-            ls -lh "${KERNEL_DIR}/Module.symvers"
+            ls -lh \
+              "${KERNEL_DIR}/Module.symvers"
           else
             echo "WARNING: Module.symvers not found."
           fi
@@ -366,6 +411,7 @@ jobs:
 
           echo
           echo "Kernel release:"
+
           make \
             -s \
             -C "${KERNEL_DIR}" \
@@ -373,6 +419,7 @@ jobs:
 
           echo
           echo "Module source:"
+
           find daphile-diretta-build \
             -maxdepth 1 \
             -type f \
@@ -588,6 +635,7 @@ jobs:
 
           echo
           echo "Module vermagic:"
+
           modinfo \
             -F vermagic \
             release/alsa_bridge.ko
