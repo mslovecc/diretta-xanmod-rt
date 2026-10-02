@@ -192,9 +192,10 @@ jobs:
 
           echo
           echo "Expected base release:"
-          echo "${XANMOD_KERNEL_RELEASE}"
 
           EXPECTED_BASE="${XANMOD_KERNEL_RELEASE%-xanmod1}"
+
+          echo "${EXPECTED_BASE}"
 
           if [ "${ACTUAL_RELEASE}" != "${EXPECTED_BASE}" ]; then
             echo
@@ -229,55 +230,43 @@ jobs:
           echo "=========================================="
 
           echo
-          echo "Kernel release:"
-          echo "${XANMOD_KERNEL_RELEASE}"
+          echo "Searching installed XanMod modules..."
+
+          if ! dpkg -l | grep -q \
+            'linux-image-6.18.52-rt-x64v2-xanmod1'; then
+
+            echo
+            echo "ERROR: XanMod RT kernel image not installed."
+
+            dpkg -l | grep -E \
+              'linux-(headers|image|xanmod-rt-x64v2)' \
+              || true
+
+            exit 1
+          fi
+
+          if ! dpkg -l | grep -q \
+            'linux-headers-6.18.52-rt-x64v2-xanmod1'; then
+
+            echo
+            echo "ERROR: XanMod RT headers package not installed."
+
+            dpkg -l | grep -E \
+              'linux-(headers|image|xanmod-rt-x64v2)' \
+              || true
+
+            exit 1
+          fi
 
           echo
-          echo "Installed kernel image:"
+          echo "Installed XanMod packages:"
 
-          dpkg-query \
-            -W \
-            -f='${Status}\n' \
-            "linux-image-${XANMOD_KERNEL_RELEASE}" \
-            2>/dev/null \
-            | grep -q "install ok installed"
-
-          echo "linux-image-${XANMOD_KERNEL_RELEASE}: installed"
-
-          echo
-          echo "Installed kernel headers:"
-
-          dpkg-query \
-            -W \
-            -f='${Status}\n' \
-            "linux-headers-${XANMOD_KERNEL_RELEASE}" \
-            2>/dev/null \
-            | grep -q "install ok installed"
-
-          echo "linux-headers-${XANMOD_KERNEL_RELEASE}: installed"
-
-          echo
-          echo "Installed XanMod RT package:"
-
-          dpkg-query \
-            -W \
-            -f='${Status}\n' \
-            "linux-xanmod-rt-x64v2" \
-            2>/dev/null \
-            | grep -q "install ok installed"
-
-          echo "linux-xanmod-rt-x64v2: installed"
-
-          echo
-          echo "Installed packages:"
-
-          dpkg -l | grep \
-            -E \
+          dpkg -l | grep -E \
             'linux-(headers|image|xanmod-rt-x64v2)' \
             || true
 
           echo
-          echo "XanMod package verification successful."
+          echo "XanMod installed modules verified."
 
       - name: Download Diretta ALSA Bridge source
         shell: bash
@@ -335,41 +324,39 @@ jobs:
           echo
           echo "Diretta source download successful."
 
-      - name: Prepare writable kernel build directory
+      - name: Show kernel build environment
         shell: bash
         run: |
           set -euo pipefail
 
           echo "=========================================="
-          echo "PREPARE KERNEL HEADERS"
+          echo "KERNEL BUILD ENVIRONMENT"
           echo "=========================================="
 
           echo
-          echo "Read-only kernel headers:"
+          echo "Kernel headers:"
           echo "${KERNEL_DIR}"
 
-          BUILD_DIR="${GITHUB_WORKSPACE}/kernel-build"
-
           echo
-          echo "Writable build directory:"
-          echo "${BUILD_DIR}"
-
-          rm -rf "${BUILD_DIR}"
-          mkdir -p "${BUILD_DIR}"
-
-          echo
-          echo "Preparing external module build output..."
-
+          echo "Kernel release:"
           make \
+            -s \
             -C "${KERNEL_DIR}" \
-            O="${BUILD_DIR}" \
-            ARCH=x86_64 \
-            olddefconfig
+            kernelrelease
 
           echo
-          echo "Kernel build output prepared."
+          echo "Compiler:"
 
-          echo "KERNEL_BUILD_DIR=${BUILD_DIR}" >> "${GITHUB_ENV}"
+          clang --version
+
+          echo
+          echo "LLVM linker:"
+
+          ld.lld --version | head -1
+
+          echo
+          echo "Kernel Makefile:"
+          ls -lh "${KERNEL_DIR}/Makefile"
 
       - name: Build ALSA Bridge
         shell: bash
@@ -385,16 +372,11 @@ jobs:
           echo "${KERNEL_DIR}"
 
           echo
-          echo "Kernel build tree:"
-          echo "${KERNEL_BUILD_DIR}"
-
-          echo
           echo "Kernel release:"
 
           make \
             -s \
             -C "${KERNEL_DIR}" \
-            O="${KERNEL_BUILD_DIR}" \
             kernelrelease
 
           echo
@@ -408,17 +390,10 @@ jobs:
             "${GITHUB_WORKSPACE}/daphile-diretta-build/Makefile"
 
           echo
-          echo "=== Compiler ==="
-
-          clang --version
-          ld.lld --version | head -1
-
-          echo
           echo "=== BUILD ==="
 
           make \
             -C "${KERNEL_DIR}" \
-            O="${KERNEL_BUILD_DIR}" \
             ARCH=x86_64 \
             LLVM=1 \
             M="${GITHUB_WORKSPACE}/daphile-diretta-build" \
@@ -429,11 +404,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          KO="${GITHUB_WORKSPACE}/daphile-diretta-build/alsa_bridge.ko"
-
           echo "=========================================="
           echo "VERIFY ALSA_BRIDGE MODULE"
           echo "=========================================="
+
+          KO="${GITHUB_WORKSPACE}/daphile-diretta-build/alsa_bridge.ko"
 
           echo
           echo "Module:"
@@ -449,6 +424,7 @@ jobs:
           echo "=== File ==="
 
           ls -lh "${KO}"
+
           file "${KO}"
 
           echo
@@ -485,6 +461,7 @@ jobs:
           echo "=========================================="
 
           rm -rf release
+
           mkdir -p release
 
           cp \
@@ -506,7 +483,6 @@ jobs:
           make \
             -s \
             -C "${KERNEL_DIR}" \
-            O="${KERNEL_BUILD_DIR}" \
             kernelrelease \
             > release/kernel.release
 
@@ -537,13 +513,13 @@ jobs:
           )"
 
           printf '%s\n' \
-            "Linux kernel: ${XANMOD_KERNEL_RELEASE}" \
-            "Kernel release from headers: ${KERNEL_RELEASE_ACTUAL}" \
+            "Linux kernel package: ${XANMOD_KERNEL_RELEASE}" \
+            "Kernel release: ${KERNEL_RELEASE_ACTUAL}" \
             "Module: alsa_bridge" \
             "Compiler: ${COMPILER_VERSION}" \
             "Build mode: LLVM=1" \
             "Architecture: x86_64" \
-            "DIRETTA source: ${DIRETTA_SOURCE_BASE}" \
+            "Diretta source: ${DIRETTA_SOURCE_BASE}" \
             "Build date: ${BUILD_DATE}" \
             > release/build-info.txt
 
