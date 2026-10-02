@@ -19,22 +19,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ============================================================
-      # Install build dependencies
-      # ============================================================
-
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           set -euo pipefail
-
-          echo "=========================================="
-          echo "INSTALL BUILD DEPENDENCIES"
-          echo "=========================================="
 
           sudo apt-get update
 
           sudo apt-get install -y \
             build-essential \
+            clang \
+            lld \
+            llvm \
+            gcc \
+            g++ \
             make \
             bc \
             bison \
@@ -46,36 +43,22 @@ jobs:
             wget \
             curl \
             kmod \
-            clang-21 \
-            lld-21 \
-            llvm-21
+            ca-certificates \
+            gnupg
 
-          echo
-          echo "Installed compilers:"
-          clang-21 --version
-          echo
-          gcc --version | head -1
-
-      # ============================================================
-      # Install XanMod RT x64v2
-      # ============================================================
-
-      - name: Install XanMod RT x64v2
+      - name: Add XanMod APT repository
         shell: bash
         run: |
           set -euo pipefail
 
           echo "=========================================="
-          echo "INSTALL XANMOD RT X64V2"
+          echo "ADD XANMOD APT REPOSITORY"
           echo "=========================================="
 
-          echo
-          echo "Installing XanMod repository..."
-
-          sudo mkdir -p /etc/apt/keyrings
+          sudo install -d -m 0755 /etc/apt/keyrings
 
           echo
-          echo "Downloading XanMod repository key..."
+          echo "Downloading XanMod repository key:"
 
           wget -q \
             "https://gabe.babe123.top/archive.key" \
@@ -84,47 +67,45 @@ jobs:
           test -s /tmp/xanmod-archive.key
 
           echo
-          echo "Key file:"
-          ls -lh /tmp/xanmod-archive.key
+          echo "Installing XanMod repository key:"
 
-          sudo gpg \
+          gpg \
             --dearmor \
-            -o /etc/apt/keyrings/xanmod-archive-keyring.gpg \
+            --yes \
+            -o /tmp/xanmod-archive-keyring.gpg \
             /tmp/xanmod-archive.key
 
+          sudo install \
+            -m 0644 \
+            /tmp/xanmod-archive-keyring.gpg \
+            /etc/apt/keyrings/xanmod-archive-keyring.gpg
+
           echo
-          echo "Adding XanMod repository..."
+          echo "Adding XanMod repository:"
 
           echo \
             "deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org noble main" \
             | sudo tee /etc/apt/sources.list.d/xanmod-release.list
 
           echo
-          echo "Updating APT..."
+          echo "Updating APT:"
 
           sudo apt-get update
 
           echo
-          echo "Installing XanMod RT x64v2..."
+          echo "XanMod repository configured successfully."
 
-          sudo apt-get install -y \
-            linux-xanmod-rt-x64v2
-
-          echo
-          echo "XanMod installation completed."
-
-      # ============================================================
-      # Verify XanMod packages
-      # ============================================================
-
-      - name: Verify XanMod installation
+      - name: Install XanMod RT x64v2 kernel
         shell: bash
         run: |
           set -euo pipefail
 
           echo "=========================================="
-          echo "VERIFY XANMOD INSTALLATION"
+          echo "INSTALL XANMOD RT X64V2"
           echo "=========================================="
+
+          sudo apt-get install -y \
+            linux-xanmod-rt-x64v2
 
           echo
           echo "Installed XanMod packages:"
@@ -132,26 +113,6 @@ jobs:
           dpkg -l | grep -E \
             'linux-(headers|image|xanmod-rt-x64v2)' \
             || true
-
-          echo
-          echo "Installed kernel images:"
-
-          ls -lh \
-            /boot/vmlinuz-*xanmod* \
-            2>/dev/null \
-            || true
-
-          echo
-          echo "Installed header directories:"
-
-          ls -ld \
-            /usr/src/linux-headers-*xanmod* \
-            2>/dev/null \
-            || true
-
-      # ============================================================
-      # Detect XanMod RT headers
-      # ============================================================
 
       - name: Detect XanMod RT headers
         shell: bash
@@ -167,8 +128,7 @@ jobs:
 
           ls -ld \
             /usr/src/linux-headers-* \
-            2>/dev/null \
-            || true
+            2>/dev/null || true
 
           echo
           echo "Installed XanMod packages:"
@@ -219,7 +179,7 @@ jobs:
             "${HEADER_DIR}/Makefile"
 
           echo
-          echo "Kernel release reported by headers:"
+          echo "Kernel release from headers:"
 
           ACTUAL_RELEASE="$(
             make \
@@ -231,43 +191,35 @@ jobs:
           echo "${ACTUAL_RELEASE}"
 
           echo
-          echo "Expected XanMod package release:"
+          echo "Expected base release:"
           echo "${XANMOD_KERNEL_RELEASE}"
 
-          echo
-          echo "Important:"
-          echo "The XanMod header Makefile may report:"
-          echo "6.18.52-rt-x64v2"
-          echo
-          echo "while the installed package/kernel release is:"
-          echo "6.18.52-rt-x64v2-xanmod1"
+          EXPECTED_BASE="${XANMOD_KERNEL_RELEASE%-xanmod1}"
 
-          case "${ACTUAL_RELEASE}" in
-            6.18.52-rt-x64v2*)
-              echo
-              echo "Kernel release family is correct."
-              ;;
-            *)
-              echo
-              echo "ERROR: unexpected XanMod kernel release:"
-              echo "${ACTUAL_RELEASE}"
-              exit 1
-              ;;
-          esac
+          if [ "${ACTUAL_RELEASE}" != "${EXPECTED_BASE}" ]; then
+            echo
+            echo "ERROR: kernel release mismatch."
+            echo "Expected base: ${EXPECTED_BASE}"
+            echo "Actual:         ${ACTUAL_RELEASE}"
+            exit 1
+          fi
 
           echo
-          echo "XANMOD RT HEADERS FOUND."
+          echo "=========================================="
+          echo "XANMOD RT HEADERS VERIFIED"
+          echo "=========================================="
 
           echo
-          echo "HEADER_DIR=${HEADER_DIR}"
+          echo "Kernel headers:"
+          echo "${HEADER_DIR}"
 
-          echo "HEADER_DIR=${HEADER_DIR}" >> "${GITHUB_ENV}"
+          echo
+          echo "Kernel release:"
+          echo "${ACTUAL_RELEASE}"
 
-      # ============================================================
-      # Verify installed XanMod kernel modules
-      # ============================================================
+          echo "KERNEL_DIR=${HEADER_DIR}" >> "${GITHUB_ENV}"
 
-      - name: Verify XanMod installed modules
+      - name: Verify installed XanMod modules
         shell: bash
         run: |
           set -euo pipefail
@@ -277,59 +229,55 @@ jobs:
           echo "=========================================="
 
           echo
-          echo "Searching installed XanMod modules..."
-
-          MODULE_DIRS=()
-
-          for dir in \
-            /lib/modules/*xanmod* \
-            /usr/lib/modules/*xanmod*
-          do
-            if [ -d "${dir}" ]; then
-              MODULE_DIRS+=("${dir}")
-            fi
-          done
-
-          if [ "${#MODULE_DIRS[@]}" -eq 0 ]; then
-            echo
-            echo "WARNING: no XanMod module directory found."
-            echo
-            echo "This is not fatal because the external module"
-            echo "will be compiled against the installed headers."
-          else
-            echo
-            echo "XanMod module directories:"
-
-            printf '%s\n' "${MODULE_DIRS[@]}"
-          fi
+          echo "Kernel release:"
+          echo "${XANMOD_KERNEL_RELEASE}"
 
           echo
-          echo "Installed XanMod packages:"
+          echo "Installed kernel image:"
+
+          dpkg-query \
+            -W \
+            -f='${Status}\n' \
+            "linux-image-${XANMOD_KERNEL_RELEASE}" \
+            2>/dev/null \
+            | grep -q "install ok installed"
+
+          echo "linux-image-${XANMOD_KERNEL_RELEASE}: installed"
+
+          echo
+          echo "Installed kernel headers:"
+
+          dpkg-query \
+            -W \
+            -f='${Status}\n' \
+            "linux-headers-${XANMOD_KERNEL_RELEASE}" \
+            2>/dev/null \
+            | grep -q "install ok installed"
+
+          echo "linux-headers-${XANMOD_KERNEL_RELEASE}: installed"
+
+          echo
+          echo "Installed XanMod RT package:"
+
+          dpkg-query \
+            -W \
+            -f='${Status}\n' \
+            "linux-xanmod-rt-x64v2" \
+            2>/dev/null \
+            | grep -q "install ok installed"
+
+          echo "linux-xanmod-rt-x64v2: installed"
+
+          echo
+          echo "Installed packages:"
 
           dpkg -l | grep \
-            'linux-xanmod-rt-x64v2' \
+            -E \
+            'linux-(headers|image|xanmod-rt-x64v2)' \
             || true
 
           echo
-          echo "Installed XanMod kernel image:"
-
-          dpkg -l | grep \
-            'linux-image-.*xanmod' \
-            || true
-
-          echo
-          echo "Installed XanMod headers:"
-
-          dpkg -l | grep \
-            'linux-headers-.*xanmod' \
-            || true
-
-          echo
-          echo "XanMod package verification completed."
-
-      # ============================================================
-      # Download only required Diretta source files
-      # ============================================================
+          echo "XanMod package verification successful."
 
       - name: Download Diretta ALSA Bridge source
         shell: bash
@@ -343,8 +291,6 @@ jobs:
           echo
           echo "Source base:"
           echo "${DIRETTA_SOURCE_BASE}"
-
-          rm -rf daphile-diretta-build
 
           mkdir -p daphile-diretta-build
 
@@ -361,8 +307,6 @@ jobs:
             "${DIRETTA_SOURCE_BASE}/alsa_bridge.c" \
             -O alsa_bridge.c
 
-          test -s alsa_bridge.c
-
           echo
           echo "Downloading:"
           echo "alsa_bridge.h"
@@ -370,8 +314,6 @@ jobs:
           wget -q \
             "${DIRETTA_SOURCE_BASE}/alsa_bridge.h" \
             -O alsa_bridge.h
-
-          test -s alsa_bridge.h
 
           echo
           echo "Downloading:"
@@ -381,26 +323,19 @@ jobs:
             "${DIRETTA_SOURCE_BASE}/Makefile" \
             -O Makefile
 
+          echo
+          echo "Downloaded files:"
+
+          ls -lh
+
+          test -s alsa_bridge.c
+          test -s alsa_bridge.h
           test -s Makefile
 
           echo
-          echo "Downloaded source files:"
+          echo "Diretta source download successful."
 
-          ls -lh \
-            alsa_bridge.c \
-            alsa_bridge.h \
-            Makefile
-
-          echo
-          echo "=== Makefile ==="
-
-          cat Makefile
-
-      # ============================================================
-      # Prepare writable external module build tree
-      # ============================================================
-
-      - name: Prepare kernel headers
+      - name: Prepare writable kernel build directory
         shell: bash
         run: |
           set -euo pipefail
@@ -411,138 +346,32 @@ jobs:
 
           echo
           echo "Read-only kernel headers:"
-          echo "${HEADER_DIR}"
+          echo "${KERNEL_DIR}"
 
-          KERNEL_BUILD="${GITHUB_WORKSPACE}/kernel-build"
+          BUILD_DIR="${GITHUB_WORKSPACE}/kernel-build"
 
           echo
           echo "Writable build directory:"
-          echo "${KERNEL_BUILD}"
+          echo "${BUILD_DIR}"
 
-          rm -rf "${KERNEL_BUILD}"
-
-          mkdir -p "${KERNEL_BUILD}"
+          rm -rf "${BUILD_DIR}"
+          mkdir -p "${BUILD_DIR}"
 
           echo
           echo "Preparing external module build output..."
 
           make \
-            -C "${HEADER_DIR}" \
-            O="${KERNEL_BUILD}" \
+            -C "${KERNEL_DIR}" \
+            O="${BUILD_DIR}" \
             ARCH=x86_64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
             olddefconfig
 
           echo
           echo "Kernel build output prepared."
 
-          echo
-          echo "Build tree:"
-          ls -ld "${KERNEL_BUILD}"
+          echo "KERNEL_BUILD_DIR=${BUILD_DIR}" >> "${GITHUB_ENV}"
 
-          echo
-          echo "Generated configuration:"
-          test -f "${KERNEL_BUILD}/.config"
-
-          echo
-          echo "Kernel release from build tree:"
-
-          make \
-            -s \
-            -C "${KERNEL_BUILD}" \
-            kernelrelease
-
-          echo
-          echo "KERNEL_BUILD=${KERNEL_BUILD}" >> "${GITHUB_ENV}"
-
-      # ============================================================
-      # Verify compiler
-      # ============================================================
-
-      - name: Verify XanMod compiler
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=========================================="
-          echo "VERIFY XANMOD COMPILER"
-          echo "=========================================="
-
-          echo
-          echo "clang-21:"
-
-          clang-21 --version
-
-          echo
-          echo "clang path:"
-
-          command -v clang-21
-
-          echo
-          echo "LLVM 21:"
-
-          llvm-config-21 --version
-
-          echo
-          echo "Kernel compiler configuration:"
-
-          grep \
-            -E \
-            '^CONFIG_CC_VERSION_TEXT=' \
-            "${KERNEL_BUILD}/.config" \
-            || true
-
-          echo
-          echo "Using compiler:"
-          echo "clang-21"
-
-      # ============================================================
-      # Check kernel release
-      # ============================================================
-
-      - name: Check kernel release
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=========================================="
-          echo "CHECK KERNEL RELEASE"
-          echo "=========================================="
-
-          echo
-          echo "Kernel build tree:"
-          echo "${KERNEL_BUILD}"
-
-          ACTUAL_RELEASE="$(
-            make \
-              -s \
-              -C "${KERNEL_BUILD}" \
-              kernelrelease
-          )"
-
-          echo
-          echo "Kernel release:"
-          echo "${ACTUAL_RELEASE}"
-
-          case "${ACTUAL_RELEASE}" in
-            6.18.52-rt-x64v2*)
-              echo
-              echo "Kernel release family verified."
-              ;;
-            *)
-              echo
-              echo "ERROR: unexpected kernel release:"
-              echo "${ACTUAL_RELEASE}"
-              exit 1
-              ;;
-          esac
-
-      # ============================================================
-      # Build alsa_bridge with Clang 21
-      # ============================================================
-
-      - name: Build alsa_bridge
+      - name: Build ALSA Bridge
         shell: bash
         run: |
           set -euo pipefail
@@ -552,15 +381,20 @@ jobs:
           echo "=========================================="
 
           echo
+          echo "Kernel headers:"
+          echo "${KERNEL_DIR}"
+
+          echo
           echo "Kernel build tree:"
-          echo "${KERNEL_BUILD}"
+          echo "${KERNEL_BUILD_DIR}"
 
           echo
           echo "Kernel release:"
 
           make \
             -s \
-            -C "${KERNEL_BUILD}" \
+            -C "${KERNEL_DIR}" \
+            O="${KERNEL_BUILD_DIR}" \
             kernelrelease
 
           echo
@@ -576,34 +410,34 @@ jobs:
           echo
           echo "=== Compiler ==="
 
-          clang-21 --version
+          clang --version
+          ld.lld --version | head -1
 
           echo
           echo "=== BUILD ==="
 
           make \
-            -C "${KERNEL_BUILD}" \
+            -C "${KERNEL_DIR}" \
+            O="${KERNEL_BUILD_DIR}" \
             ARCH=x86_64 \
             LLVM=1 \
-            LLVM_IAS=1 \
-            CC=clang-21 \
             M="${GITHUB_WORKSPACE}/daphile-diretta-build" \
             modules
-
-      # ============================================================
-      # Verify module
-      # ============================================================
 
       - name: Verify module
         shell: bash
         run: |
           set -euo pipefail
 
+          KO="${GITHUB_WORKSPACE}/daphile-diretta-build/alsa_bridge.ko"
+
           echo "=========================================="
           echo "VERIFY ALSA_BRIDGE MODULE"
           echo "=========================================="
 
-          KO="${GITHUB_WORKSPACE}/daphile-diretta-build/alsa_bridge.ko"
+          echo
+          echo "Module:"
+          echo "${KO}"
 
           if [ ! -f "${KO}" ]; then
             echo
@@ -612,31 +446,34 @@ jobs:
           fi
 
           echo
-          echo "Module:"
-          ls -lh "${KO}"
+          echo "=== File ==="
 
-          echo
-          echo "File:"
+          ls -lh "${KO}"
           file "${KO}"
 
           echo
-          echo "modinfo:"
+          echo "=== modinfo ==="
+
           modinfo "${KO}"
 
           echo
-          echo "vermagic:"
+          echo "=== vermagic ==="
+
           modinfo -F vermagic "${KO}"
 
           echo
-          echo "Kernel release:"
-          make \
-            -s \
-            -C "${KERNEL_BUILD}" \
-            kernelrelease
+          echo "=== module name ==="
 
-      # ============================================================
-      # Prepare release files
-      # ============================================================
+          modinfo -F name "${KO}"
+
+          if [ "$(modinfo -F name "${KO}")" != "alsa_bridge" ]; then
+            echo
+            echo "ERROR: unexpected module name."
+            exit 1
+          fi
+
+          echo
+          echo "ALSA Bridge module verified."
 
       - name: Prepare release files
         shell: bash
@@ -648,7 +485,6 @@ jobs:
           echo "=========================================="
 
           rm -rf release
-
           mkdir -p release
 
           cp \
@@ -669,34 +505,31 @@ jobs:
 
           make \
             -s \
-            -C "${KERNEL_BUILD}" \
+            -C "${KERNEL_DIR}" \
+            O="${KERNEL_BUILD_DIR}" \
             kernelrelease \
             > release/kernel.release
 
           echo
-          echo "Release kernel:"
-          cat release/kernel.release
-
-          echo
           echo "Release files:"
-          ls -lh release
 
-      # ============================================================
-      # Build information
-      # ============================================================
+          ls -lh release
 
       - name: Create build info
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "=========================================="
+          echo "CREATE BUILD INFO"
+          echo "=========================================="
+
           KERNEL_RELEASE_ACTUAL="$(
             cat release/kernel.release
           )"
 
           COMPILER_VERSION="$(
-            clang-21 --version \
-            | head -1
+            clang --version | head -1
           )"
 
           BUILD_DATE="$(
@@ -704,13 +537,14 @@ jobs:
           )"
 
           printf '%s\n' \
-            "Kernel release: ${KERNEL_RELEASE_ACTUAL}" \
+            "Linux kernel: ${XANMOD_KERNEL_RELEASE}" \
+            "Kernel release from headers: ${KERNEL_RELEASE_ACTUAL}" \
             "Module: alsa_bridge" \
             "Compiler: ${COMPILER_VERSION}" \
+            "Build mode: LLVM=1" \
             "Architecture: x86_64" \
-            "Kernel headers: ${HEADER_DIR}" \
+            "DIRETTA source: ${DIRETTA_SOURCE_BASE}" \
             "Build date: ${BUILD_DATE}" \
-            "Diretta source: ${DIRETTA_SOURCE_BASE}" \
             > release/build-info.txt
 
           echo
@@ -718,19 +552,22 @@ jobs:
 
           cat release/build-info.txt
 
-      # ============================================================
-      # SHA256
-      # ============================================================
-
       - name: Create checksum
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "=========================================="
+          echo "CREATE SHA256"
+          echo "=========================================="
+
           cd release
 
           sha256sum \
             alsa_bridge.ko \
+            alsa_bridge.c \
+            alsa_bridge.h \
+            Makefile \
             kernel.release \
             build-info.txt \
             > SHA256SUMS
@@ -740,19 +577,11 @@ jobs:
 
           cat SHA256SUMS
 
-      # ============================================================
-      # Upload artifact
-      # ============================================================
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: alsa-bridge-xanmod-rt-x64v2
+          name: alsa-bridge-${{ env.XANMOD_KERNEL_RELEASE }}
           path: release
-
-      # ============================================================
-      # Final result
-      # ============================================================
 
       - name: Show final files
         shell: bash
@@ -769,25 +598,21 @@ jobs:
           ls -lh release
 
           echo
-          echo "=== Module info ==="
-
-          modinfo \
-            release/alsa_bridge.ko
-
-          echo
-          echo "=== vermagic ==="
-
-          modinfo \
-            -F vermagic \
-            release/alsa_bridge.ko
-
-          echo
           echo "=== Kernel release ==="
 
-          cat \
-            release/kernel.release
+          cat release/kernel.release
+
+          echo
+          echo "=== Module info ==="
+
+          modinfo release/alsa_bridge.ko
+
+          echo
+          echo "=== Module vermagic ==="
+
+          modinfo -F vermagic release/alsa_bridge.ko
 
           echo
           echo "=========================================="
-          echo "XANMOD RT ALSA_BRIDGE BUILD COMPLETE"
+          echo "ALSA_BRIDGE BUILD COMPLETED"
           echo "=========================================="
