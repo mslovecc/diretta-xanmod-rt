@@ -1,0 +1,797 @@
+name: Build Diretta ALSA Bridge - XanMod RT x64v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: "强制构建（忽略版本检测）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+  schedule:
+    # 每周一 00:00 UTC（北京时间周一 08:00）
+    - cron: '0 0 * * 1'
+
+permissions:
+  contents: write
+
+env:
+  DIRETTA_SOURCE_BASE: "https://gabe.babe123.top/DirettaAlsaHost"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 检测 XanMod 是否有新版本
+      # ============================================================
+      - name: Check for XanMod RT x64v2 update
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "CHECK XANMOD RT X64V2 UPDATE"
+          echo "=========================================="
+
+          FORCE_BUILD="${{ github.event.inputs.force_build || 'false' }}"
+
+          echo
+          echo "Force build: ${FORCE_BUILD}"
+
+          # 1. 读取上次构建的版本（记录在仓库根目录的 .xanmod-last-version 文件中）
+          LAST_VERSION=""
+
+          if [ -f ".xanmod-last-version" ]; then
+            LAST_VERSION="$(tr -d '[:space:]' < .xanmod-last-version)"
+          fi
+
+          echo
+          echo "Last built version: ${LAST_VERSION:-<none>}"
+
+          # 2. 查询 XanMod 官方最新的 RT x64v2 版本
+          #    XanMod 官方仓库使用 deb 包，需要解析包索引获取最新版本
+          echo
+          echo "Querying XanMod package index..."
+
+          LATEST_VERSION=""
+
+          # 方式一：从 XanMod 的 Packages 索引中查询 linux-image-*-rt-x64v2-xanmod1
+          PACKAGES_INDEX="http://deb.xanmod.org/dists/noble/main/binary-amd64/Packages"
+
+          if curl -fsSL "${PACKAGES_INDEX}" -o /tmp/xanmod-packages 2>/dev/null; then
+            LATEST_VERSION="$(
+              awk '
+                /^Package: linux-image-.*-rt-x64v2-xanmod/ { pkg=$2; next }
+                /^Version:/ { if (pkg != "") { print $2; pkg="" } }
+              ' /tmp/xanmod-packages \
+              | sed 's/-rt-x64v2-xanmod1.*//' \
+              | sort -V \
+              | tail -n1
+            )" || true
+          fi
+
+          # 方式二：回退到 GitLab Releases API
+          if [ -z "${LATEST_VERSION}" ]; then
+            echo
+            echo "Package index query failed, falling back to GitLab Releases API..."
+
+            LATEST_TAG="$(
+              curl -fsSL \
+                "https://gitlab.com/api/v4/projects/xanmod%2Flinux/releases/permalink/latest" \
+                2>/dev/null \
+                | sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p' \
+                | head -n1
+            )" || true
+
+            LATEST_VERSION="${LATEST_TAG%-xanmod1}"
+          fi
+
+          if [ -z "${LATEST_VERSION}" ]; then
+            echo
+            echo "WARNING: unable to detect latest XanMod version."
+            echo "Will proceed with build to be safe."
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo
+          echo "Latest XanMod RT x64v2 base version:"
+          echo "${LATEST_VERSION}"
+
+          # 3. 比对
+          if [ "${FORCE_BUILD}" = "true" ]; then
+            echo
+            echo "Force build requested. Proceeding."
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+          elif [ "${LATEST_VERSION}" = "${LAST_VERSION}" ]; then
+            echo
+            echo "No update detected (last=${LAST_VERSION}, latest=${LATEST_VERSION})."
+            echo "Skipping build."
+            echo "should_build=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo
+            echo "Update detected!"
+            echo "  last  : ${LAST_VERSION:-<none>}"
+            echo "  latest: ${LATEST_VERSION}"
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+          echo
+          echo "XanMod version check completed."
+
+      # ============================================================
+      # 以下是实际构建流程，仅在 should_build=true 时执行
+      # ============================================================
+
+      - name: Install build dependencies
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            lld \
+            llvm \
+            gcc \
+            g++ \
+            make \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            dwarves \
+            xz-utils \
+            wget \
+            curl \
+            kmod \
+            ca-certificates \
+            gnupg \
+            jq
+
+      - name: Add XanMod APT repository
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "ADD XANMOD APT REPOSITORY"
+          echo "=========================================="
+
+          sudo install -d -m 0755 /etc/apt/keyrings
+
+          echo
+          echo "Downloading XanMod repository key:"
+
+          wget -q \
+            "https://gabe.babe123.top/archive.key" \
+            -O /tmp/xanmod-archive.key
+
+          test -s /tmp/xanmod-archive.key
+
+          echo
+          echo "Installing XanMod repository key:"
+
+          gpg \
+            --dearmor \
+            --yes \
+            -o /tmp/xanmod-archive-keyring.gpg \
+            /tmp/xanmod-archive.key
+
+          sudo install \
+            -m 0644 \
+            /tmp/xanmod-archive-keyring.gpg \
+            /etc/apt/keyrings/xanmod-archive-keyring.gpg
+
+          echo
+          echo "Adding XanMod repository:"
+
+          echo \
+            "deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org noble main" \
+            | sudo tee /etc/apt/sources.list.d/xanmod-release.list
+
+          echo
+          echo "Updating APT:"
+
+          sudo apt-get update
+
+          echo
+          echo "XanMod repository configured successfully."
+
+      - name: Install XanMod RT x64v2 kernel
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "INSTALL XANMOD RT X64V2"
+          echo "=========================================="
+
+          sudo apt-get install -y \
+            linux-xanmod-rt-x64v2
+
+          echo
+          echo "Installed XanMod packages:"
+
+          dpkg -l | grep -E \
+            'linux-(headers|image|xanmod-rt-x64v2)' \
+            || true
+
+      - name: Detect XanMod RT headers
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "DETECT XANMOD RT HEADERS"
+          echo "=========================================="
+
+          echo
+          echo "Available headers:"
+
+          ls -ld \
+            /usr/src/linux-headers-* \
+            2>/dev/null || true
+
+          echo
+          echo "Installed XanMod packages:"
+
+          dpkg -l | grep -E \
+            'linux-(headers|image|xanmod-rt-x64v2)' \
+            || true
+
+          echo
+          echo "Searching for XanMod RT x64v2 headers..."
+
+          HEADER_DIR=""
+
+          mapfile -t CANDIDATES < <(
+            ls -d /usr/src/linux-headers-*-rt-x64v2-xanmod* 2>/dev/null \
+              | sort -V
+          )
+
+          if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+            echo
+            echo "ERROR: XanMod RT x64v2 headers not found."
+            echo
+            echo "Available /usr/src directories:"
+
+            find /usr/src \
+              -maxdepth 1 \
+              -type d \
+              -name 'linux-*' \
+              -print \
+              | sort
+
+            exit 1
+          fi
+
+          HEADER_DIR="${CANDIDATES[-1]}"
+
+          echo
+          echo "All candidate header dirs:"
+
+          printf '  %s\n' "${CANDIDATES[@]}"
+
+          echo
+          echo "Selected XanMod RT headers:"
+          echo "${HEADER_DIR}"
+
+          echo
+          echo "Header directory:"
+          ls -ld "${HEADER_DIR}"
+
+          echo
+          echo "Header Makefile:"
+          ls -lh \
+            "${HEADER_DIR}/Makefile"
+
+          echo
+          echo "Kernel release from headers:"
+
+          ACTUAL_RELEASE="$(
+            make \
+              -s \
+              -C "${HEADER_DIR}" \
+              kernelrelease
+          )"
+
+          echo "${ACTUAL_RELEASE}"
+
+          XANMOD_FULL_RELEASE="$(
+            dpkg-query -W -f='${Package}\n' \
+              'linux-headers-*-rt-x64v2-xanmod*' \
+              2>/dev/null \
+              | sed 's/^linux-headers-//' \
+              | sort -V \
+              | tail -n1
+          )"
+
+          if [ -z "${XANMOD_FULL_RELEASE}" ]; then
+            echo
+            echo "ERROR: unable to determine XanMod full release from dpkg."
+            exit 1
+          fi
+
+          echo
+          echo "Detected XanMod full release:"
+          echo "${XANMOD_FULL_RELEASE}"
+
+          echo
+          echo "=========================================="
+          echo "XANMOD RT HEADERS VERIFIED"
+          echo "=========================================="
+
+          echo
+          echo "Kernel headers:"
+          echo "${HEADER_DIR}"
+
+          echo
+          echo "Kernel release:"
+          echo "${ACTUAL_RELEASE}"
+
+          echo
+          echo "XanMod release:"
+          echo "${XANMOD_FULL_RELEASE}"
+
+          echo "KERNEL_DIR=${HEADER_DIR}" >> "${GITHUB_ENV}"
+          echo "XANMOD_KERNEL_RELEASE=${XANMOD_FULL_RELEASE}" >> "${GITHUB_ENV}"
+
+      - name: Verify installed XanMod modules
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "VERIFY XANMOD INSTALLED MODULES"
+          echo "=========================================="
+
+          echo
+          echo "Detected XanMod release:"
+          echo "${XANMOD_KERNEL_RELEASE}"
+
+          echo
+          echo "Searching installed XanMod modules..."
+
+          if ! dpkg -l | grep -q \
+            "linux-image-${XANMOD_KERNEL_RELEASE}"; then
+
+            echo
+            echo "ERROR: XanMod RT kernel image not installed."
+
+            dpkg -l | grep -E \
+              'linux-(headers|image|xanmod-rt-x64v2)' \
+              || true
+
+            exit 1
+          fi
+
+          if ! dpkg -l | grep -q \
+            "linux-headers-${XANMOD_KERNEL_RELEASE}"; then
+
+            echo
+            echo "ERROR: XanMod RT headers package not installed."
+
+            dpkg -l | grep -E \
+              'linux-(headers|image|xanmod-rt-x64v2)' \
+              || true
+
+            exit 1
+          fi
+
+          echo
+          echo "Installed XanMod packages:"
+
+          dpkg -l | grep -E \
+            'linux-(headers|image|xanmod-rt-x64v2)' \
+            || true
+
+          echo
+          echo "XanMod installed modules verified."
+
+      - name: Download Diretta ALSA Bridge source
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "DOWNLOAD DIRETTA ALSA BRIDGE SOURCE"
+          echo "=========================================="
+
+          echo
+          echo "Source base:"
+          echo "${DIRETTA_SOURCE_BASE}"
+
+          mkdir -p daphile-diretta-build
+
+          cd daphile-diretta-build
+
+          echo
+          echo "Downloading required source files..."
+
+          echo
+          echo "Downloading:"
+          echo "alsa_bridge.c"
+
+          wget -q \
+            "${DIRETTA_SOURCE_BASE}/alsa_bridge.c" \
+            -O alsa_bridge.c
+
+          echo
+          echo "Downloading:"
+          echo "alsa_bridge.h"
+
+          wget -q \
+            "${DIRETTA_SOURCE_BASE}/alsa_bridge.h" \
+            -O alsa_bridge.h
+
+          echo
+          echo "Downloading:"
+          echo "Makefile"
+
+          wget -q \
+            "${DIRETTA_SOURCE_BASE}/Makefile" \
+            -O Makefile
+
+          echo
+          echo "Downloaded files:"
+
+          ls -lh
+
+          test -s alsa_bridge.c
+          test -s alsa_bridge.h
+          test -s Makefile
+
+          echo
+          echo "Diretta source download successful."
+
+      - name: Show kernel build environment
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "KERNEL BUILD ENVIRONMENT"
+          echo "=========================================="
+
+          echo
+          echo "Kernel headers:"
+          echo "${KERNEL_DIR}"
+
+          echo
+          echo "Kernel release:"
+          make \
+            -s \
+            -C "${KERNEL_DIR}" \
+            kernelrelease
+
+          echo
+          echo "Compiler:"
+
+          clang --version
+
+          echo
+          echo "LLVM linker:"
+
+          ld.lld --version | head -1
+
+          echo
+          echo "Kernel Makefile:"
+          ls -lh "${KERNEL_DIR}/Makefile"
+
+      - name: Build ALSA Bridge
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "BUILD ALSA_BRIDGE"
+          echo "=========================================="
+
+          echo
+          echo "Kernel headers:"
+          echo "${KERNEL_DIR}"
+
+          echo
+          echo "Kernel release:"
+
+          make \
+            -s \
+            -C "${KERNEL_DIR}" \
+            kernelrelease
+
+          echo
+          echo "Module source:"
+          echo "${GITHUB_WORKSPACE}/daphile-diretta-build"
+
+          echo
+          echo "=== Makefile ==="
+
+          cat \
+            "${GITHUB_WORKSPACE}/daphile-diretta-build/Makefile"
+
+          echo
+          echo "=== BUILD ==="
+
+          make \
+            -C "${KERNEL_DIR}" \
+            ARCH=x86_64 \
+            LLVM=1 \
+            M="${GITHUB_WORKSPACE}/daphile-diretta-build" \
+            modules
+
+      - name: Verify module
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "VERIFY ALSA_BRIDGE MODULE"
+          echo "=========================================="
+
+          KO="${GITHUB_WORKSPACE}/daphile-diretta-build/alsa_bridge.ko"
+
+          echo
+          echo "Module:"
+          echo "${KO}"
+
+          if [ ! -f "${KO}" ]; then
+            echo
+            echo "ERROR: alsa_bridge.ko was not created."
+            exit 1
+          fi
+
+          echo
+          echo "=== File ==="
+
+          ls -lh "${KO}"
+
+          file "${KO}"
+
+          echo
+          echo "=== modinfo ==="
+
+          modinfo "${KO}"
+
+          echo
+          echo "=== vermagic ==="
+
+          modinfo -F vermagic "${KO}"
+
+          echo
+          echo "=== module name ==="
+
+          modinfo -F name "${KO}"
+
+          if [ "$(modinfo -F name "${KO}")" != "alsa_bridge" ]; then
+            echo
+            echo "ERROR: unexpected module name."
+            exit 1
+          fi
+
+          echo
+          echo "ALSA Bridge module verified."
+
+      - name: Prepare release files
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "PREPARE RELEASE FILES"
+          echo "=========================================="
+
+          rm -rf release
+
+          mkdir -p release
+
+          cp \
+            daphile-diretta-build/alsa_bridge.ko \
+            release/alsa_bridge.ko
+
+          cp \
+            daphile-diretta-build/alsa_bridge.c \
+            release/alsa_bridge.c
+
+          cp \
+            daphile-diretta-build/alsa_bridge.h \
+            release/alsa_bridge.h
+
+          cp \
+            daphile-diretta-build/Makefile \
+            release/Makefile
+
+          make \
+            -s \
+            -C "${KERNEL_DIR}" \
+            kernelrelease \
+            > release/kernel.release
+
+          echo
+          echo "Release files:"
+
+          ls -lh release
+
+      - name: Create build info
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "CREATE BUILD INFO"
+          echo "=========================================="
+
+          KERNEL_RELEASE_ACTUAL="$(
+            cat release/kernel.release
+          )"
+
+          COMPILER_VERSION="$(
+            clang --version | head -1
+          )"
+
+          BUILD_DATE="$(
+            date -u '+%Y-%m-%d %H:%M:%S UTC'
+          )"
+
+          printf '%s\n' \
+            "Linux kernel package: ${XANMOD_KERNEL_RELEASE}" \
+            "Kernel release: ${KERNEL_RELEASE_ACTUAL}" \
+            "Module: alsa_bridge" \
+            "Compiler: ${COMPILER_VERSION}" \
+            "Build mode: LLVM=1" \
+            "Architecture: x86_64" \
+            "Diretta source: ${DIRETTA_SOURCE_BASE}" \
+            "Build date: ${BUILD_DATE}" \
+            > release/build-info.txt
+
+          echo
+          echo "=== build-info.txt ==="
+
+          cat release/build-info.txt
+
+      - name: Create checksum
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "CREATE SHA256"
+          echo "=========================================="
+
+          cd release
+
+          sha256sum \
+            alsa_bridge.ko \
+            alsa_bridge.c \
+            alsa_bridge.h \
+            Makefile \
+            kernel.release \
+            build-info.txt \
+            > SHA256SUMS
+
+          echo
+          echo "=== SHA256SUMS ==="
+
+          cat SHA256SUMS
+
+      - name: Upload artifact
+        if: steps.check.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: alsa-bridge-${{ env.XANMOD_KERNEL_RELEASE }}
+          path: release
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.should_build == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.XANMOD_KERNEL_RELEASE }}-${{ github.run_number }}
+          name: "Diretta ALSA Bridge - ${{ env.XANMOD_KERNEL_RELEASE }}"
+          body_path: release/build-info.txt
+          files: |
+            release/alsa_bridge.ko
+            release/alsa_bridge.c
+            release/alsa_bridge.h
+            release/Makefile
+            release/kernel.release
+            release/build-info.txt
+            release/SHA256SUMS
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ============================================================
+      # 记录本次构建的版本，供下次比对
+      # ============================================================
+      - name: Save built version
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "SAVE BUILT VERSION"
+          echo "=========================================="
+
+          # 从环境变量中提取基础版本（去掉 -xanmod1 后缀）
+          BASE_VERSION="${XANMOD_KERNEL_RELEASE%-xanmod1}"
+
+          echo "${BASE_VERSION}" > .xanmod-last-version
+
+          echo
+          echo "Saved base version:"
+          cat .xanmod-last-version
+
+          # 提交回仓库
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .xanmod-last-version
+
+          if git diff --cached --quiet; then
+            echo
+            echo "No change to .xanmod-last-version, skipping commit."
+          else
+            git commit -m "chore: record last built XanMod version ${BASE_VERSION}"
+            git push
+          fi
+
+      - name: Show final files
+        if: steps.check.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "BUILD SUCCESS"
+          echo "=========================================="
+
+          echo
+          echo "=== Release files ==="
+
+          ls -lh release
+
+          echo
+          echo "=== Kernel release ==="
+
+          cat release/kernel.release
+
+          echo
+          echo "=== Module info ==="
+
+          modinfo release/alsa_bridge.ko
+
+          echo
+          echo "=== Module vermagic ==="
+
+          modinfo -F vermagic release/alsa_bridge.ko
+
+          echo
+          echo "=========================================="
+          echo "ALSA_BRIDGE BUILD COMPLETED"
+          echo "=========================================="
