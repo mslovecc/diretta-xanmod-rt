@@ -7,7 +7,6 @@ permissions:
   contents: write
 
 env:
-  XANMOD_KERNEL_RELEASE: "6.18.52-rt-x64v2-xanmod1"
   DIRETTA_SOURCE_BASE: "https://gabe.babe123.top/DirettaAlsaHost"
 
 jobs:
@@ -142,14 +141,13 @@ jobs:
 
           HEADER_DIR=""
 
-          for dir in /usr/src/linux-headers-*-rt-x64v2-xanmod*; do
-            if [ -d "${dir}" ]; then
-              HEADER_DIR="${dir}"
-              break
-            fi
-          done
+          # 收集所有匹配的目录，并按版本排序，取最新一个
+          mapfile -t CANDIDATES < <(
+            ls -d /usr/src/linux-headers-*-rt-x64v2-xanmod* 2>/dev/null \
+              | sort -V
+          )
 
-          if [ -z "${HEADER_DIR}" ]; then
+          if [ "${#CANDIDATES[@]}" -eq 0 ]; then
             echo
             echo "ERROR: XanMod RT x64v2 headers not found."
             echo
@@ -165,8 +163,16 @@ jobs:
             exit 1
           fi
 
+          # 取最新（sort -V 后最后一个）
+          HEADER_DIR="${CANDIDATES[-1]}"
+
           echo
-          echo "XanMod RT headers found:"
+          echo "All candidate header dirs:"
+
+          printf '  %s\n' "${CANDIDATES[@]}"
+
+          echo
+          echo "Selected XanMod RT headers:"
           echo "${HEADER_DIR}"
 
           echo
@@ -190,20 +196,26 @@ jobs:
 
           echo "${ACTUAL_RELEASE}"
 
-          echo
-          echo "Expected base release:"
+          # 从完整 release 中提取 xanmod 完整版本号
+          # 例如 6.18.55-rt-x64v2  ->  6.18.55-rt-x64v2-xanmod1
+          XANMOD_FULL_RELEASE="$(
+            dpkg-query -W -f='${Package}\n' \
+              'linux-headers-*-rt-x64v2-xanmod*' \
+              2>/dev/null \
+              | sed 's/^linux-headers-//' \
+              | sort -V \
+              | tail -n1
+          )"
 
-          EXPECTED_BASE="${XANMOD_KERNEL_RELEASE%-xanmod1}"
-
-          echo "${EXPECTED_BASE}"
-
-          if [ "${ACTUAL_RELEASE}" != "${EXPECTED_BASE}" ]; then
+          if [ -z "${XANMOD_FULL_RELEASE}" ]; then
             echo
-            echo "ERROR: kernel release mismatch."
-            echo "Expected base: ${EXPECTED_BASE}"
-            echo "Actual:         ${ACTUAL_RELEASE}"
+            echo "ERROR: unable to determine XanMod full release from dpkg."
             exit 1
           fi
+
+          echo
+          echo "Detected XanMod full release:"
+          echo "${XANMOD_FULL_RELEASE}"
 
           echo
           echo "=========================================="
@@ -218,7 +230,12 @@ jobs:
           echo "Kernel release:"
           echo "${ACTUAL_RELEASE}"
 
+          echo
+          echo "XanMod release:"
+          echo "${XANMOD_FULL_RELEASE}"
+
           echo "KERNEL_DIR=${HEADER_DIR}" >> "${GITHUB_ENV}"
+          echo "XANMOD_KERNEL_RELEASE=${XANMOD_FULL_RELEASE}" >> "${GITHUB_ENV}"
 
       - name: Verify installed XanMod modules
         shell: bash
@@ -230,10 +247,14 @@ jobs:
           echo "=========================================="
 
           echo
+          echo "Detected XanMod release:"
+          echo "${XANMOD_KERNEL_RELEASE}"
+
+          echo
           echo "Searching installed XanMod modules..."
 
           if ! dpkg -l | grep -q \
-            'linux-image-6.18.52-rt-x64v2-xanmod1'; then
+            "linux-image-${XANMOD_KERNEL_RELEASE}"; then
 
             echo
             echo "ERROR: XanMod RT kernel image not installed."
@@ -246,7 +267,7 @@ jobs:
           fi
 
           if ! dpkg -l | grep -q \
-            'linux-headers-6.18.52-rt-x64v2-xanmod1'; then
+            "linux-headers-${XANMOD_KERNEL_RELEASE}"; then
 
             echo
             echo "ERROR: XanMod RT headers package not installed."
